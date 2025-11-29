@@ -25,14 +25,15 @@ def init_log_file():
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, mode="w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["timestamp_iso", "helmet_id", "rssi", "signal_percent", "client_ip"])
+            writer.writerow(["timestamp_iso", "helmet_id", "rssi", "signal_percent", "latitude", "longitude", "client_ip"])
 
 
 @app.route("/rssi", methods=["POST"])
 def receive_rssi():
     """
-    Receive RSSI data from ESP32 helmets.
-    Accepts either: {"helmet_id": 1234, "rssi": -67} or {"helmet_id": 1234, "signal": 82}
+    Receive RSSI data from ESP32 helmets with GPS coordinates.
+    Required: helmet_id, latitude, longitude
+    Optional: rssi (dBm) or signal (0-100%)
     Automatically converts between dBm and percentage.
     """
     data = request.get_json(silent=True)
@@ -42,9 +43,15 @@ def receive_rssi():
     helmet_id = data.get("helmet_id")
     rssi = data.get("rssi")
     signal = data.get("signal")
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
 
+    # Validate required fields
     if helmet_id is None:
         return jsonify({"status": "error", "message": "helmet_id required"}), 400
+    
+    if latitude is None or longitude is None:
+        return jsonify({"status": "error", "message": "latitude and longitude required"}), 400
     
     if rssi is None and signal is None:
         return jsonify({"status": "error", "message": "Either rssi or signal required"}), 400
@@ -56,16 +63,42 @@ def receive_rssi():
         rssi = percent_to_rssi(signal)
 
     ts = datetime.utcnow().isoformat()
+    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     client_ip = request.remote_addr
 
-    print(f"[{ts}] helmet_id={helmet_id}, rssi={rssi} dBm, signal={signal}%, from={client_ip}")
+    print(f"[{ts}] helmet_id={helmet_id}, rssi={rssi} dBm, signal={signal}%, lat={latitude:.6f}, lon={longitude:.6f}, from={client_ip}")
 
+    # Log to RSSI CSV with coordinates
     init_log_file()
     with open(LOG_FILE, mode="a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([ts, helmet_id, rssi, signal, client_ip])
+        writer.writerow([ts, helmet_id, rssi, signal, latitude, longitude, client_ip])
 
-    return jsonify({"status": "ok", "rssi": rssi, "signal": signal}), 200
+    # Also update coordinates log (for drone navigation)
+    coords_log = "coordinates_log.csv"
+    if not os.path.exists(coords_log):
+        with open(coords_log, mode="w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp_iso", "timestamp_ms", "latitude", "longitude", 
+                "accuracy", "altitude", "speed", "client_ip"
+            ])
+    
+    # Append coordinates to CSV (accuracy, altitude, speed will be None for helmet data)
+    with open(coords_log, mode="a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            ts, timestamp_ms, latitude, longitude, 
+            None, None, None, client_ip
+        ])
+
+    return jsonify({
+        "status": "ok", 
+        "rssi": rssi, 
+        "signal": signal,
+        "latitude": latitude,
+        "longitude": longitude
+    }), 200
 
 
 def rssi_to_percent(rssi):

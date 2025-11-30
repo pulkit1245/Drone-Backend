@@ -32,47 +32,52 @@ def init_log_file():
 def receive_rssi():
     """
     Receive RSSI data from ESP32 helmets with GPS coordinates.
-    Required: helmet_id, latitude, longitude
-    Optional: rssi (dBm) or signal (0-100%)
-    Automatically converts between dBm and percentage.
+    Accepts bulk format with multiple helmets.
+    
+    Required format:
+    {
+        "latitude": float,
+        "longitude": float,
+        "signals": {
+            "helmet_id": signal_strength,
+            ...
+        }
+    }
     """
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
-    helmet_id = data.get("helmet_id")
-    rssi = data.get("rssi")
-    signal = data.get("signal")
     latitude = data.get("latitude")
     longitude = data.get("longitude")
+    signals = data.get("signals")
 
     # Validate required fields
-    if helmet_id is None:
-        return jsonify({"status": "error", "message": "helmet_id required"}), 400
-    
     if latitude is None or longitude is None:
         return jsonify({"status": "error", "message": "latitude and longitude required"}), 400
     
-    if rssi is None and signal is None:
-        return jsonify({"status": "error", "message": "Either rssi or signal required"}), 400
-
-    # Convert between formats if needed
-    if rssi is not None and signal is None:
-        signal = rssi_to_percent(rssi)
-    elif signal is not None and rssi is None:
-        rssi = percent_to_rssi(signal)
+    if signals is None or not isinstance(signals, dict) or len(signals) == 0:
+        return jsonify({"status": "error", "message": "signals dictionary required with at least one helmet"}), 400
 
     ts = datetime.utcnow().isoformat()
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     client_ip = request.remote_addr
 
-    print(f"[{ts}] helmet_id={helmet_id}, rssi={rssi} dBm, signal={signal}%, lat={latitude:.6f}, lon={longitude:.6f}, from={client_ip}")
-
-    # Log to RSSI CSV with coordinates
+    # Process each helmet in the signals dictionary
     init_log_file()
-    with open(LOG_FILE, mode="a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([ts, helmet_id, rssi, signal, latitude, longitude, client_ip])
+    for helmet_id, signal in signals.items():
+        # Convert signal to int if needed
+        signal = int(signal)
+        
+        # Calculate RSSI from signal percentage
+        rssi = percent_to_rssi(signal)
+
+        print(f"[{ts}] helmet_id={helmet_id}, rssi={rssi} dBm, signal={signal}%, lat={latitude:.6f}, lon={longitude:.6f}, from={client_ip}")
+
+        # Log to RSSI CSV with coordinates
+        with open(LOG_FILE, mode="a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([ts, helmet_id, rssi, signal, latitude, longitude, client_ip])
 
     # Also update coordinates log (for drone navigation)
     coords_log = "coordinates_log.csv"
@@ -95,9 +100,7 @@ def receive_rssi():
     return jsonify({
         "latitude": latitude,
         "longitude": longitude,
-        "signals": {
-            str(helmet_id): signal
-        }
+        "signals": signals
     }), 200
 
 

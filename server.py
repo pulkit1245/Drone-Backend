@@ -96,7 +96,7 @@ def receive_rssi():
         "latitude": latitude,
         "longitude": longitude,
         "signals": {
-            helmet_id: signal
+            str(helmet_id): signal
         }
     }), 200
 
@@ -325,7 +325,7 @@ def get_coordinates_drone():
                         rssi_parts = line.strip().split(',')
                         # Parse: timestamp_iso, helmet_id, rssi, signal_percent, latitude, longitude, client_ip
                         if len(rssi_parts) >= 4:
-                            helmet_id = int(rssi_parts[1])
+                            helmet_id = rssi_parts[1]  # Keep as string
                             signal = int(float(rssi_parts[3]))  # signal_percent
                             signals[helmet_id] = signal  # Later entries will overwrite earlier ones
         

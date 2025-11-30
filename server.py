@@ -93,11 +93,11 @@ def receive_rssi():
         ])
 
     return jsonify({
-        "status": "ok", 
-        "rssi": rssi, 
-        "signal": signal,
         "latitude": latitude,
-        "longitude": longitude
+        "longitude": longitude,
+        "signals": {
+            helmet_id: signal
+        }
     }), 200
 
 
@@ -249,26 +249,42 @@ def get_location():
 @app.route("/get-coordinates-drone", methods=["GET"])
 def get_coordinates_drone():
     """
-    Get latest GPS coordinates from Android app with signal strength as a simple array for drone.
+    Get latest GPS coordinates from Android app with signal strength data for drone.
     
     Returns the most recent coordinates from Android app (POST /coordinates) 
-    combined with the latest signal strength from ESP32 (POST /rssi).
+    combined with all helmet signal strengths from ESP32 (POST /rssi).
     
     Returns:
-        Array of 4 doubles: [latitude, longitude, 1, signal]
-        Example: [28.7522064, 77.4985367, 1.0, 88.0]
+        {
+            "latitude": float,
+            "longitude": float,
+            "signals": {
+                helmet_id: signal_strength,
+                ...
+            }
+        }
         
-        - [0] = latitude (degrees)
-        - [1] = longitude (degrees)
-        - [2] = reserved (always 1.0)
-        - [3] = signal strength (0-100%)
+        Example: 
+        {
+            "latitude": 28.7522064,
+            "longitude": 77.4985367,
+            "signals": {
+                1: 88,
+                2: 75,
+                3: 92
+            }
+        }
     """
     coords_log = "coordinates_log.csv"
     
     # Check if coordinates file exists
     if not os.path.exists(coords_log):
         # No coordinates received yet
-        return jsonify([0.0, 0.0, 0.0, 0.0]), 200
+        return jsonify({
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "signals": {}
+        }), 200
     
     try:
         # Read the last line from coordinates CSV (most recent GPS)
@@ -277,7 +293,11 @@ def get_coordinates_drone():
             
             # Need at least header + 1 data line
             if len(lines) < 2:
-                return jsonify([0.0, 0.0, 0.0, 0.0]), 200
+                return jsonify({
+                    "latitude": 0.0,
+                    "longitude": 0.0,
+                    "signals": {}
+                }), 200
             
             # Get last line (most recent coordinates)
             last_line = lines[-1].strip()
@@ -288,28 +308,41 @@ def get_coordinates_drone():
                 latitude = float(parts[2])
                 longitude = float(parts[3])
             else:
-                return jsonify([0.0, 0.0, 0.0, 0.0]), 200
+                return jsonify({
+                    "latitude": 0.0,
+                    "longitude": 0.0,
+                    "signals": {}
+                }), 200
         
-        # Get latest signal strength from RSSI log
-        signal = 0.0
+        # Get all helmet signal strengths from RSSI log
+        signals = {}
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, mode="r") as f:
                 rssi_lines = f.readlines()
                 if len(rssi_lines) >= 2:
-                    # Get last RSSI line
-                    last_rssi = rssi_lines[-1].strip()
-                    rssi_parts = last_rssi.split(',')
-                    # Parse: timestamp_iso, helmet_id, rssi, signal_percent, client_ip
-                    if len(rssi_parts) >= 4:
-                        signal = float(rssi_parts[3])  # signal_percent
+                    # Parse all RSSI entries and keep the latest for each helmet
+                    for line in rssi_lines[1:]:  # Skip header
+                        rssi_parts = line.strip().split(',')
+                        # Parse: timestamp_iso, helmet_id, rssi, signal_percent, latitude, longitude, client_ip
+                        if len(rssi_parts) >= 4:
+                            helmet_id = int(rssi_parts[1])
+                            signal = int(float(rssi_parts[3]))  # signal_percent
+                            signals[helmet_id] = signal  # Later entries will overwrite earlier ones
         
-        # Return array: [latitude, longitude, 1, signal]
-        coordinates = [latitude, longitude, 1.0, signal]
-        return jsonify(coordinates), 200
+        # Return new format: {latitude, longitude, signals}
+        return jsonify({
+            "latitude": latitude,
+            "longitude": longitude,
+            "signals": signals
+        }), 200
                 
     except Exception as e:
         print(f"Error reading coordinates: {e}")
-        return jsonify([0.0, 0.0, 0.0, 0.0]), 500
+        return jsonify({
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "signals": {}
+        }), 500
 
 
 

@@ -272,9 +272,9 @@ def get_coordinates_drone():
             "latitude": 28.7522064,
             "longitude": 77.4985367,
             "signals": {
-                1: 88,
-                2: 75,
-                3: 92
+                "1": 88,
+                "2": 75,
+                "3": 92
             }
         }
     """
@@ -284,6 +284,7 @@ def get_coordinates_drone():
     if not os.path.exists(coords_log):
         # No coordinates received yet
         return jsonify({
+            "initialized": False,
             "latitude": 0.0,
             "longitude": 0.0,
             "signals": {}
@@ -297,6 +298,7 @@ def get_coordinates_drone():
             # Need at least header + 1 data line
             if len(lines) < 2:
                 return jsonify({
+                    "initialized": False,
                     "latitude": 0.0,
                     "longitude": 0.0,
                     "signals": {}
@@ -312,6 +314,7 @@ def get_coordinates_drone():
                 longitude = float(parts[3])
             else:
                 return jsonify({
+                    "initialized": False,
                     "latitude": 0.0,
                     "longitude": 0.0,
                     "signals": {}
@@ -332,8 +335,12 @@ def get_coordinates_drone():
                             signal = int(float(rssi_parts[3]))  # signal_percent
                             signals[helmet_id] = signal  # Later entries will overwrite earlier ones
         
-        # Return new format: {latitude, longitude, signals}
+        # Data is initialized if we have valid coordinates
+        initialized = latitude != 0.0 or longitude != 0.0
+        
+        # Return new format: {initialized, latitude, longitude, signals}
         return jsonify({
+            "initialized": initialized,
             "latitude": latitude,
             "longitude": longitude,
             "signals": signals
@@ -342,6 +349,7 @@ def get_coordinates_drone():
     except Exception as e:
         print(f"Error reading coordinates: {e}")
         return jsonify({
+            "initialized": False,
             "latitude": 0.0,
             "longitude": 0.0,
             "signals": {}
@@ -434,6 +442,71 @@ def get_signal():
         return jsonify({
             "status": "error",
             "message": str(e)
+        }), 500
+
+
+@app.route("/clear-drone-data", methods=["POST"])
+def clear_drone_data():
+    """
+    Clear all drone-related data (coordinates and helmet signals).
+    This is a convenience endpoint specifically for drone data.
+    
+    Optional query params:
+        - confirm=yes (required for safety)
+    
+    Returns:
+        {
+            "status": "ok",
+            "message": "Drone data cleared successfully",
+            "cleared": {
+                "coordinates": bool,
+                "helmet_signals": bool
+            }
+        }
+    """
+    confirm = request.args.get('confirm', '')
+    
+    if confirm != 'yes':
+        return jsonify({
+            "status": "error",
+            "message": "Please add ?confirm=yes to confirm data deletion"
+        }), 400
+    
+    try:
+        cleared = {
+            "coordinates": False,
+            "helmet_signals": False
+        }
+        
+        # Clear RSSI log (helmet signals)
+        if os.path.exists(LOG_FILE):
+            os.remove(LOG_FILE)
+            init_log_file()  # Recreate with headers
+            cleared["helmet_signals"] = True
+        
+        # Clear coordinates log
+        coords_log = "coordinates_log.csv"
+        if os.path.exists(coords_log):
+            os.remove(coords_log)
+            # Recreate with headers
+            with open(coords_log, mode="w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "timestamp_iso", "timestamp_ms", "latitude", "longitude", 
+                    "accuracy", "altitude", "speed", "client_ip"
+                ])
+            cleared["coordinates"] = True
+        
+        return jsonify({
+            "status": "ok",
+            "message": "Drone data cleared successfully",
+            "cleared": cleared
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Error clearing drone data: {str(e)}"
         }), 500
 
 

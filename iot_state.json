@@ -1,0 +1,10 @@
+{
+  "variables": {
+    "start_navigation": {
+      "triggered": true,
+      "timestamp": "2025-12-11T23:26:03.805387",
+      "triggered_by": "android_app"
+    }
+  },
+  "button_counts": {}
+}

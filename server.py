@@ -13,8 +13,12 @@ from datetime import datetime
 import csv
 import os
 from location_service import LocationService
+from iot_controller import iot_bp
 
 app = Flask(__name__)
+
+# Register IoT controller blueprint
+app.register_blueprint(iot_bp, url_prefix='/iot')
 
 LOG_FILE = "rssi_log.csv"
 location_service = LocationService()
@@ -129,7 +133,7 @@ def receive_coordinates():
     """
     Receive GPS coordinates from Android app.
     Required: latitude, longitude, timestamp
-    Optional: accuracy, altitude, speed
+    Optional: accuracy, altitude, speed, azimuth, pitch, roll
     """
     data = request.get_json(silent=True)
     if data is None:
@@ -141,6 +145,9 @@ def receive_coordinates():
     accuracy = data.get("accuracy")
     altitude = data.get("altitude")
     speed = data.get("speed")
+    azimuth = data.get("azimuth")
+    pitch = data.get("pitch")
+    roll = data.get("roll")
 
     # Validate required fields
     if latitude is None or longitude is None or timestamp is None:
@@ -164,6 +171,8 @@ def receive_coordinates():
         log_msg += f", altitude={altitude:.1f}m"
     if speed is not None:
         log_msg += f", speed={speed:.2f}m/s"
+    if azimuth is not None:
+        log_msg += f", azimuth={azimuth:.1f}°"
     log_msg += f", from={client_ip}"
     
     print(log_msg)
@@ -177,7 +186,7 @@ def receive_coordinates():
             writer = csv.writer(f)
             writer.writerow([
                 "timestamp_iso", "timestamp_ms", "latitude", "longitude", 
-                "accuracy", "altitude", "speed", "client_ip"
+                "accuracy", "altitude", "speed", "azimuth", "pitch", "roll", "client_ip"
             ])
     
     # Append coordinates to CSV
@@ -185,7 +194,7 @@ def receive_coordinates():
         writer = csv.writer(f)
         writer.writerow([
             ts_iso, timestamp, latitude, longitude, 
-            accuracy, altitude, speed, client_ip
+            accuracy, altitude, speed, azimuth, pitch, roll, client_ip
         ])
 
     # Return success with the received data
@@ -198,9 +207,320 @@ def receive_coordinates():
             "timestamp_iso": ts_iso,
             "accuracy": accuracy,
             "altitude": altitude,
-            "speed": speed
+            "speed": speed,
+            "azimuth": azimuth,
+            "pitch": pitch,
+            "roll": roll
         }
     }), 200
+
+@app.route("/history", methods=["GET"])
+def get_history():
+    """
+    Get GPS and compass data history (last 10 entries).
+    
+    Returns:
+        {
+            "count": int,
+            "data": [
+                {
+                    "latitude": float,
+                    "longitude": float,
+                    "timestamp": int,
+                    "accuracy": float,
+                    "altitude": float,
+                    "speed": float,
+                    "azimuth": float,
+                    "pitch": float,
+                    "roll": float
+                },
+                ...
+            ]
+        }
+    """
+    coords_log = "coordinates_log.csv"
+    
+    if not os.path.exists(coords_log):
+        return jsonify({"count": 0, "data": []}), 200
+    
+    try:
+        history_data = []
+        with open(coords_log, mode="r") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            
+            # Get last 10 entries
+            last_10 = rows[-10:] if len(rows) > 10 else rows
+            
+            for row in last_10:
+                entry = {
+                    "latitude": float(row["latitude"]) if row["latitude"] else None,
+                    "longitude": float(row["longitude"]) if row["longitude"] else None,
+                    "timestamp": int(row["timestamp_ms"]) if row["timestamp_ms"] else None,
+                    "accuracy": float(row["accuracy"]) if row.get("accuracy") and row["accuracy"] != '' else None,
+                    "altitude": float(row["altitude"]) if row.get("altitude") and row["altitude"] != '' else None,
+                    "speed": float(row["speed"]) if row.get("speed") and row["speed"] != '' else None,
+                    "azimuth": float(row["azimuth"]) if row.get("azimuth") and row["azimuth"] != '' else None,
+                    "pitch": float(row["pitch"]) if row.get("pitch") and row["pitch"] != '' else None,
+                    "roll": float(row["roll"]) if row.get("roll") and row["roll"] != '' else None
+                }
+                history_data.append(entry)
+        
+        return jsonify({
+            "count": len(history_data),
+            "data": history_data
+        }), 200
+        
+    except Exception as e:
+        print(f"Error reading history: {e}")
+        return jsonify({"count": 0, "data": [], "error": str(e)}), 500
+
+# Global variable to store the current safe waypoint
+current_waypoint = {
+    "latitude": None,
+    "longitude": None,
+    "timestamp": None,
+    "set_by": None
+}
+
+@app.route("/safe-coordinates", methods=["POST"])
+def receive_safe_coordinates():
+    """
+    Receive safe waypoint coordinates from the mobile app.
+    This is the destination that ESP32 should navigate to.
+    
+    Required: latitude, longitude
+    Optional: timestamp, set_by
+    """
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
+    timestamp = data.get("timestamp")
+    set_by = data.get("set_by", "mobile_app")
+
+    # Validate required fields
+    if latitude is None or longitude is None:
+        return jsonify({
+            "status": "error", 
+            "message": "latitude and longitude are required"
+        }), 400
+
+    # Update global waypoint
+    current_waypoint["latitude"] = latitude
+    current_waypoint["longitude"] = longitude
+    current_waypoint["timestamp"] = timestamp
+    current_waypoint["set_by"] = set_by
+
+    # Get client IP
+    client_ip = request.remote_addr
+    
+    # Convert timestamp if provided
+    from datetime import datetime as dt
+    if timestamp:
+        ts_iso = dt.utcfromtimestamp(timestamp / 1000.0).isoformat()
+    else:
+        ts_iso = dt.utcnow().isoformat()
+        current_waypoint["timestamp"] = int(dt.utcnow().timestamp() * 1000)
+
+    # Log to console
+    print(f"[{ts_iso}] SAFE WAYPOINT SET: lat={latitude:.6f}, lon={longitude:.6f}, by={set_by}, from={client_ip}")
+
+    # Store in CSV for history
+    waypoint_log = "safe_waypoints_log.csv"
+    
+    # Create file with header if it doesn't exist
+    if not os.path.exists(waypoint_log):
+        with open(waypoint_log, mode="w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp_iso", "timestamp_ms", "latitude", "longitude", 
+                "set_by", "client_ip"
+            ])
+    
+    # Append waypoint to CSV
+    with open(waypoint_log, mode="a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            ts_iso, current_waypoint["timestamp"], latitude, longitude, 
+            set_by, client_ip
+        ])
+
+    return jsonify({
+        "status": "ok",
+        "message": "Safe waypoint updated",
+        "waypoint": {
+            "latitude": latitude,
+            "longitude": longitude,
+            "timestamp": current_waypoint["timestamp"],
+            "timestamp_iso": ts_iso,
+            "set_by": set_by
+        }
+    }), 200
+
+@app.route("/waypoint", methods=["GET"])
+def get_waypoint():
+    """
+    Get the current safe waypoint for ESP32 navigation.
+    
+    Returns:
+        {
+            "status": "ok",
+            "waypoint": {
+                "latitude": float,
+                "longitude": float,
+                "timestamp": int,
+                "set_by": str
+            }
+        }
+    """
+    if current_waypoint["latitude"] is None or current_waypoint["longitude"] is None:
+        return jsonify({
+            "status": "no_waypoint",
+            "message": "No waypoint has been set yet",
+            "waypoint": None
+        }), 200
+    
+    return jsonify({
+        "status": "ok",
+        "waypoint": {
+            "latitude": current_waypoint["latitude"],
+            "longitude": current_waypoint["longitude"],
+            "timestamp": current_waypoint["timestamp"],
+            "set_by": current_waypoint["set_by"]
+        }
+    }), 200
+
+# Helper functions for direction calculation
+def normalize_angle(angle):
+    """Keep angle in [0, 360) range."""
+    while angle < 0:
+        angle += 360
+    while angle >= 360:
+        angle -= 360
+    return angle
+
+def normalize_diff(diff):
+    """Convert angle difference to [-180, 180] range."""
+    while diff > 180:
+        diff -= 360
+    while diff < -180:
+        diff += 360
+    return diff
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Compute great-circle distance in meters."""
+    import math
+    R = 6371000.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def bearing_to_target(lat1, lon1, lat2, lon2):
+    """Calculate bearing (0–360°) from current → target."""
+    import math
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    y = math.sin(dlon) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlon)
+    brng = math.degrees(math.atan2(y, x))
+    return normalize_angle(brng)
+
+def decide_direction(heading, target_bearing):
+    """Decide LEFT, RIGHT, FRONT, BACK based on heading difference."""
+    diff = normalize_diff(target_bearing - heading)
+    if abs(diff) <= 15:
+        return "FRONT"
+    elif diff > 15 and diff <= 90:
+        return "RIGHT"
+    elif diff < -15 and diff >= -90:
+        return "LEFT"
+    else:
+        return "BACK"
+
+@app.route("/calculate-direction", methods=["GET"])
+def calculate_direction():
+    """
+    Calculate direction to waypoint based on current GPS position.
+    Uses the latest GPS data from /history and current waypoint from /safe-coordinates.
+    
+    Returns direction (FRONT/BACK/LEFT/RIGHT), bearing, distance, etc.
+    """
+    # Get current waypoint
+    if current_waypoint["latitude"] is None or current_waypoint["longitude"] is None:
+        return jsonify({
+            "status": "error",
+            "message": "No waypoint set. Use POST /safe-coordinates first."
+        }), 400
+    
+    # Get latest GPS position
+    coords_log = "coordinates_log.csv"
+    if not os.path.exists(coords_log):
+        return jsonify({
+            "status": "error",
+            "message": "No GPS data available"
+        }), 400
+    
+    try:
+        with open(coords_log, mode="r") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            
+            if len(rows) == 0:
+                return jsonify({
+                    "status": "error",
+                    "message": "No GPS data available"
+                }), 400
+            
+            latest = rows[-1]
+            
+            # Extract current position
+            lat = float(latest["latitude"])
+            lon = float(latest["longitude"])
+            heading = float(latest["azimuth"]) if latest.get("azimuth") and latest["azimuth"] != '' else None
+            
+            if heading is None:
+                return jsonify({
+                    "status": "error",
+                    "message": "No azimuth (compass heading) available"
+                }), 400
+            
+            # Calculate bearing and distance to waypoint
+            target_lat = current_waypoint["latitude"]
+            target_lon = current_waypoint["longitude"]
+            
+            bearing = bearing_to_target(lat, lon, target_lat, target_lon)
+            distance = haversine(lat, lon, target_lat, target_lon)
+            direction = decide_direction(heading, bearing)
+            
+            return jsonify({
+                "status": "ok",
+                "direction": direction,
+                "current_position": {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "heading": heading
+                },
+                "waypoint": {
+                    "latitude": target_lat,
+                    "longitude": target_lon
+                },
+                "navigation": {
+                    "bearing": round(bearing, 2),
+                    "distance": round(distance, 2),
+                    "heading_diff": round(normalize_diff(bearing - heading), 2)
+                }
+            }), 200
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 @app.route("/location", methods=["GET"])
 def get_location():
